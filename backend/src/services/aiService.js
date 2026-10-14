@@ -5,6 +5,7 @@
 //  - Failed processing is recorded (ai_processing_status='failed') so admins can act manually.
 import * as repo from '../repositories/ticketRepository.js';
 import { findBookById } from '../repositories/bookRepository.js';
+import { findUserById } from '../repositories/userRepository.js';
 import { complete, parseJsonOutput, isAiConfigured, AiUnavailableError } from '../ai/claudeClient.js';
 import {
   CLASSIFY_SYSTEM, PRIORITY_SYSTEM, DRAFT_SYSTEM, PROMPT_VERSION,
@@ -20,23 +21,41 @@ function sanitizeRationale(s, max = 500) {
   return s.replace(/[\u0000-\u001F]+/g, ' ').trim().slice(0, max) || null;
 }
 
+// ---------- AI output validation (pure, unit-testable) ----------
+
+export function validateClassification(text) {
+  const parsed = parseJsonOutput(text);
+  const category = parsed?.category;
+  if (!TICKET_CATEGORIES.includes(category)) {
+    throw new Error(`Invalid category returned by model: ${JSON.stringify(category)?.slice(0, 80)}`);
+  }
+  return { category, rationale: sanitizeRationale(parsed.rationale) };
+}
+
+export function validatePriorityScore(text) {
+  const parsed = parseJsonOutput(text);
+  const priority = parsed?.priority;
+  if (!TICKET_PRIORITIES.includes(priority)) {
+    throw new Error(`Invalid priority returned by model: ${JSON.stringify(priority)?.slice(0, 80)}`);
+  }
+  return { priority, rationale: sanitizeRationale(parsed.rationale) };
+}
+
+export function validateDraftOutput(text) {
+  const parsed = parseJsonOutput(text);
+  const draft = typeof parsed?.draft === 'string' ? parsed.draft.trim() : null;
+  if (!draft || draft.length < 40) throw new Error('Model returned an empty or too-short draft');
+  return { draft: draft.slice(0, 8000), usedSections: Array.isArray(parsed.used_sections) ? parsed.used_sections : [] };
+}
+
 export async function classifyTicket(ticket, book) {
   const { text, usage, model } = await complete({
     system: CLASSIFY_SYSTEM,
     user: classifyUserPrompt({ subject: ticket.subject, description: ticket.description, bookTitle: book?.title }),
     maxTokens: 300,
   });
-  const parsed = parseJsonOutput(text);
-  const category = parsed?.category;
-  if (!TICKET_CATEGORIES.includes(category)) {
-    throw new Error(`Invalid category returned by model: ${JSON.stringify(category)?.slice(0, 80)}`);
-  }
-  return {
-    category,
-    rationale: sanitizeRationale(parsed.rationale),
-    model,
-    usage,
-  };
+  const { category, rationale } = validateClassification(text);
+  return { category, rationale, model, usage };
 }
 
 export async function scorePriority(ticket, book, category) {
@@ -47,12 +66,8 @@ export async function scorePriority(ticket, book, category) {
     }),
     maxTokens: 300,
   });
-  const parsed = parseJsonOutput(text);
-  const priority = parsed?.priority;
-  if (!TICKET_PRIORITIES.includes(priority)) {
-    throw new Error(`Invalid priority returned by model: ${JSON.stringify(priority)?.slice(0, 80)}`);
-  }
-  return { priority, rationale: sanitizeRationale(parsed.rationale), model, usage };
+  const { priority, rationale } = validatePriorityScore(text);
+  return { priority, rationale, model, usage };
 }
 
 export async function generateDraft(ticket, book, authorName) {
@@ -68,10 +83,8 @@ export async function generateDraft(ticket, book, authorName) {
     }),
     maxTokens: config.ai.maxTokens,
   });
-  const parsed = parseJsonOutput(text);
-  const draft = typeof parsed?.draft === 'string' ? parsed.draft.trim() : null;
-  if (!draft || draft.length < 40) throw new Error('Model returned an empty or too-short draft');
-  return { draft: draft.slice(0, 8000), usedSections: Array.isArray(parsed.used_sections) ? parsed.used_sections : [], model, usage };
+  const { draft, usedSections } = validateDraftOutput(text);
+  return { draft, usedSections, model, usage };
 }
 
 // Post-creation hook: runs classification + priority scoring, persists results,
@@ -123,9 +136,9 @@ export async function generateDraftForTicket(ticketId) {
   if (!ticket) throw notFound('Ticket not found');
   if (!isAiConfigured()) throw new AiUnavailableError('AI is not configured (missing ANTHROPIC_API_KEY). Write the reply manually.');
   const book = ticket.book_id ? await findBookById(ticket.book_id) : null;
-  const authorName = ticket.author_name || 'Author';
-  const full = await repo.findTicketById(ticketId);
-  const result = await generateDraft(full, book, authorName);
+  const author = await findUserById(ticket.author_user_id);
+  const authorName = author?.name || 'Author';
+  const result = await generateDraft(ticket, book, authorName);
   await repo.updateTicketFields(ticketId, {
     ai_draft: result.draft,
     ai_draft_generated_at: new Date(),
