@@ -11,13 +11,13 @@ export const TICKET_PRIORITIES = ['Critical', 'High', 'Medium', 'Low'];
 export const TICKET_STATUSES = ['Open', 'In Progress', 'Resolved', 'Closed'];
 
 // Documented status lifecycle:
-// Open -> In Progress | Closed
-// In Progress -> Resolved | Closed
+// Open -> In Progress
+// In Progress -> Resolved
 // Resolved -> Closed | In Progress (reopen when the author replies)
 // Closed -> (terminal)
 export const STATUS_TRANSITIONS = {
-  Open: ['In Progress', 'Closed'],
-  'In Progress': ['Resolved', 'Closed'],
+  Open: ['In Progress'],
+  'In Progress': ['Resolved'],
   Resolved: ['In Progress', 'Closed'],
   Closed: [],
 };
@@ -27,4 +27,4 @@ export function isValidTransition(from, to) {
   return (STATUS_TRANSITIONS[from] || []).includes(to);
 }
 
-export const ROLES = { AUTHOR: 'author', ADMIN: 'admin' };
+export const ROLES = { AUTHOR: 'AUTHOR', ADMIN: 'ADMIN' };

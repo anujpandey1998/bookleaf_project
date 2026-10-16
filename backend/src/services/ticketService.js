@@ -3,8 +3,10 @@ import { findBookById, getAuthorRoyaltySummary } from '../repositories/bookRepos
 import { findUserById } from '../repositories/userRepository.js';
 import { processNewTicket } from './aiService.js';
 import { broadcast } from './sseService.js';
+import { listTicketAttachments as getAttachments } from './attachmentService.js';
 import { isValidTransition } from '../utils/constants.js';
-import { notFound, forbidden, badRequest } from '../utils/errors.js';
+import { notFound, forbidden, badRequest, conflict } from '../utils/errors.js';
+import { isAiConfigured } from '../ai/geminiClient.js';
 
 // ---------- shaping (never leak private fields) ----------
 
@@ -42,6 +44,8 @@ export function shapeTicketListItem(t) {
     bookId: t.book_id,
     bookTitle: t.book_title || null,
     bookCode: t.book_code || null,
+    categorySource: t.category_source || null,
+    prioritySource: t.priority_source || null,
     attachmentName: t.attachment_name,
     createdAt: t.created_at,
     updatedAt: t.updated_at,
@@ -49,9 +53,10 @@ export function shapeTicketListItem(t) {
 }
 
 // Author view of a ticket detail: NO internal notes, NO admin-only fields like rationale/assigned admin/drafts.
-export function shapeTicketAuthorDetail(t, messages) {
+export function shapeTicketAuthorDetail(t, messages, attachments) {
   return {
     ...shapeTicketListItem(t),
+    attachments,
     messages: messages.map((m) => ({
       id: m.id,
       body: m.body,
@@ -63,13 +68,14 @@ export function shapeTicketAuthorDetail(t, messages) {
 }
 
 // Admin view: everything including internal notes, AI metadata, events. Still no password data anywhere.
-export function shapeTicketAdminDetail(t, messages, events) {
+export function shapeTicketAdminDetail(t, messages, events, draft, attachments) {
   return {
     id: t.id,
     reference: t.reference,
     subject: t.subject,
     description: t.description,
     attachmentName: t.attachment_name,
+    attachments,
     status: t.status,
     category: t.category,
     categorySource: t.category_source,
@@ -77,8 +83,9 @@ export function shapeTicketAdminDetail(t, messages, events) {
     priority: t.priority,
     prioritySource: t.priority_source,
     priorityRationale: t.priority_rationale,
-    aiDraft: t.ai_draft,
-    aiDraftGeneratedAt: t.ai_draft_generated_at,
+    aiDraft: draft?.body || null,
+    aiDraftGeneratedAt: draft?.generated_at || null,
+    aiConfigured: isAiConfigured(),
     aiProcessingStatus: t.ai_processing_status,
     aiModel: t.ai_model,
     assignedAdmin: t.assigned_admin_id ? { id: t.assigned_admin_id } : null, // enriched by caller
@@ -123,7 +130,11 @@ export async function createTicket({ authorUserId, bookId, subject, description,
   await repo.insertTicketEvent({ ticketId, actorUserId: authorUserId, event: 'created' });
 
   // Fire-and-forget AI processing AFTER the ticket is safely persisted.
-  processNewTicket(ticketId).catch(() => {});
+  processNewTicket(ticketId).catch((error) => {
+    // Keep operational diagnostics free of ticket content and provider response bodies.
+    // eslint-disable-next-line no-console
+    console.error('[ai] Ticket processing could not be recorded:', error?.name || 'Error');
+  });
 
   return repo.findTicketById(ticketId);
 }
@@ -136,8 +147,11 @@ export async function getAuthorTicketDetail(ticketId, authorUserId) {
   const t = await repo.findTicketById(ticketId);
   if (!t) throw notFound('Ticket not found');
   if (t.author_user_id !== authorUserId) throw forbidden('This ticket belongs to another author');
-  const messages = await repo.listMessages(ticketId, { authorView: true }); // filters internal notes in SQL
-  return { ticket: t, messages };
+  const [messages, attachments] = await Promise.all([
+    repo.listMessages(ticketId, { authorView: true }), // filters internal notes in SQL
+    getAttachments(ticketId),
+  ]);
+  return { ticket: t, messages, attachments };
 }
 
 export async function getAuthorDashboard(authorUserId) {
@@ -161,13 +175,15 @@ export async function getAuthorDashboard(authorUserId) {
 export async function getAdminTicket(id) {
   const t = await repo.findTicketById(id);
   if (!t) throw notFound('Ticket not found');
-  const [messages, events, author, book] = await Promise.all([
+  const [messages, events, author, book, draft, attachments] = await Promise.all([
     repo.listMessages(t.id, { authorView: false }),
     repo.listTicketEvents(t.id),
     findUserById(t.author_user_id),
     t.book_id ? findBookById(t.book_id) : null,
+    repo.getTicketDraft(t.id),
+    getAttachments(t.id),
   ]);
-  const shaped = shapeTicketAdminDetail(t, messages, events);
+  const shaped = shapeTicketAdminDetail(t, messages, events, draft, attachments);
   shaped.author = author;
   shaped.book = book ? shapeBookPublic(book) : null;
   if (t.assigned_admin_id) {
@@ -195,12 +211,23 @@ export async function updateTicketByAdmin({ ticketId, adminUser, changes }) {
   if (changes.category && changes.category !== t.category) {
     fields.category = changes.category;
     fields.category_source = 'manual';
+    fields.category_rationale = null;
     events.push({ event: 'category_overridden', detail: { from: t.category, to: changes.category } });
   }
   if (changes.priority && changes.priority !== t.priority) {
     fields.priority = changes.priority;
     fields.priority_source = 'manual';
+    fields.priority_rationale = null;
     events.push({ event: 'priority_overridden', detail: { from: t.priority, to: changes.priority } });
+  }
+  const nextCategory = changes.category || t.category;
+  const nextPriority = fields.priority || t.priority;
+  if (nextCategory === 'ISBN & Metadata Issues' && !['Critical', 'High'].includes(nextPriority)) {
+    if (changes.priority) throw badRequest('ISBN and metadata issues must have High or Critical priority');
+    fields.priority = 'High';
+    fields.priority_source = 'manual';
+    fields.priority_rationale = 'Raised to High under the ISBN and metadata escalation policy.';
+    events.push({ event: 'priority_raised', detail: { from: t.priority, to: 'High', reason: 'ISBN escalation policy' } });
   }
   if (changes.assignToMe) {
     fields.assigned_admin_id = adminUser.id;
@@ -212,7 +239,16 @@ export async function updateTicketByAdmin({ ticketId, adminUser, changes }) {
     events.push({ event: 'assigned', detail: { adminId: adminUser.id, adminName: adminUser.name } });
   }
   if ('aiDraft' in changes) {
-    fields.ai_draft = changes.aiDraft; // saving a draft NEVER sends it
+    if (changes.aiDraft === null) {
+      await repo.deleteTicketDraft(ticketId);
+    } else {
+      await repo.saveTicketDraft({
+        ticketId,
+        body: changes.aiDraft,
+        model: (await repo.getTicketDraft(ticketId))?.model || null,
+        generatedAt: new Date(),
+      });
+    }
     events.push({ event: 'draft_saved' });
   }
 
@@ -235,10 +271,45 @@ export async function addInternalNote({ ticketId, adminUser, body }) {
   return messageId;
 }
 
+export async function addAuthorReply({ ticketId, authorUser, body }) {
+  const ticket = await repo.findTicketById(ticketId);
+  if (!ticket) throw notFound('Ticket not found');
+  if (ticket.author_user_id !== authorUser.id) throw forbidden('This ticket belongs to another author');
+  if (ticket.status === 'Closed') throw conflict('Closed tickets cannot receive new replies');
+
+  const messageId = await repo.insertMessage({
+    ticketId,
+    senderUserId: authorUser.id,
+    kind: 'public_reply',
+    body,
+  });
+  if (ticket.status === 'Resolved') {
+    await repo.updateTicketFields(ticketId, { status: 'In Progress' });
+    await repo.insertTicketEvent({
+      ticketId,
+      actorUserId: authorUser.id,
+      event: 'status_changed',
+      detail: { from: 'Resolved', to: 'In Progress', reason: 'author replied' },
+    });
+    broadcast(ticketId, 'status', { status: 'In Progress' });
+  }
+  await repo.insertTicketEvent({ ticketId, actorUserId: authorUser.id, event: 'reply_received' });
+  broadcast(ticketId, 'message', {
+    id: messageId,
+    body,
+    senderName: authorUser.name,
+    senderRole: 'AUTHOR',
+    createdAt: new Date(),
+  });
+  return messageId;
+}
+
 export async function sendPublicReply({ ticketId, adminUser, body }) {
   const t = await repo.findTicketById(ticketId);
   if (!t) throw notFound('Ticket not found');
+  if (t.status === 'Closed') throw conflict('Closed tickets cannot receive new replies');
   const messageId = await repo.insertMessage({ ticketId, senderUserId: adminUser.id, kind: 'public_reply', body });
+  await repo.deleteTicketDraft(ticketId);
   await repo.updateTicketFields(ticketId, {}); // bumps updated_at so queue ordering reflects the reply
   await repo.insertTicketEvent({ ticketId, actorUserId: adminUser.id, event: 'reply_sent' });
   // Notify connected author clients in real time.
@@ -246,7 +317,7 @@ export async function sendPublicReply({ ticketId, adminUser, body }) {
     id: messageId,
     body,
     senderName: adminUser.name,
-    senderRole: 'admin',
+    senderRole: 'ADMIN',
     createdAt: new Date(),
   });
   return messageId;

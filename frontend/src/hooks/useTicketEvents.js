@@ -1,27 +1,49 @@
 import { useEffect, useRef } from 'react';
-import { api } from '../api/client.js';
+import { streamTicketEvents } from '../api/client.js';
 
-// Subscribe to a ticket's SSE stream (new replies / status changes) without manual refresh.
-// Falls back silently: if SSE fails, callers can still poll.
+function waitForRetry(delay, signal) {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, delay);
+    signal.addEventListener('abort', finish, { once: true });
+  });
+}
+
 export function useTicketEvents(ticketId, handlers) {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
 
   useEffect(() => {
     if (!ticketId) return undefined;
-    let source;
-    try {
-      source = new EventSource(api.sseUrl(ticketId));
-    } catch {
-      return undefined;
+    const controller = new AbortController();
+    let retryDelay = 1000;
+
+    async function connect() {
+      while (!controller.signal.aborted) {
+        try {
+          await streamTicketEvents(ticketId, (payload) => {
+            if (payload.event === 'message') handlersRef.current.onMessage?.(payload.data);
+            else if (payload.event === 'status') handlersRef.current.onStatus?.(payload.data);
+          }, controller.signal);
+          retryDelay = 1000;
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          handlersRef.current.onError?.(error);
+        }
+        await waitForRetry(retryDelay, controller.signal);
+        retryDelay = Math.min(retryDelay * 2, 15000);
+      }
     }
-    source.addEventListener('message', (e) => {
-      try { handlersRef.current.onMessage?.(JSON.parse(e.data)); } catch { /* ignore malformed */ }
-    });
-    source.addEventListener('status', (e) => {
-      try { handlersRef.current.onStatus?.(JSON.parse(e.data)); } catch { /* ignore */ }
-    });
-    source.onerror = () => { /* EventSource auto-reconnects; no-op keeps console clean */ };
-    return () => source.close();
+
+    connect();
+    return () => controller.abort();
   }, [ticketId]);
 }

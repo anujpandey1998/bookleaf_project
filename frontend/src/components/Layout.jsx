@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { NavLink, Navigate, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { Spinner } from './ui.jsx';
@@ -16,7 +17,7 @@ export function ProtectedRoute({ role, children }) {
   if (loading) return <Spinner label="Restoring session…" />;
   if (!user) return <Navigate to="/login" replace />;
   if (role && user.role !== role) {
-    return <Navigate to={user.role === 'admin' ? '/admin' : '/author'} replace />;
+    return <Navigate to={user.role === 'ADMIN' ? '/admin' : '/author'} replace />;
   }
   return children;
 }
@@ -24,11 +25,17 @@ export function ProtectedRoute({ role, children }) {
 export function PortalLayout({ role }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
-  const isAuthor = role === 'author';
+  const isAuthor = role === 'AUTHOR';
+  const [logoutError, setLogoutError] = useState('');
 
-  const handleLogout = () => {
-    logout();
-    navigate('/login', { replace: true });
+  const handleLogout = async () => {
+    setLogoutError('');
+    try {
+      await logout();
+      navigate('/login', { replace: true });
+    } catch (error) {
+      setLogoutError(error.message || 'Could not sign out. Please retry.');
+    }
   };
 
   return (
@@ -68,6 +75,7 @@ export function PortalLayout({ role }) {
         </div>
       </aside>
       <main className="main">
+        {logoutError && <div className="alert alert--error logout-alert" role="alert">{logoutError}</div>}
         <Outlet />
       </main>
     </div>

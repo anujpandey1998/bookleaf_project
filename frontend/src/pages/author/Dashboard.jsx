@@ -68,9 +68,15 @@ export default function AuthorDashboard() {
 
 function TicketPreview() {
   const [tickets, setTickets] = useState([]);
+  const [error, setError] = useState('');
   useEffect(() => {
-    api.authorTickets().then((t) => setTickets(t.slice(0, 5))).catch(() => {});
+    let active = true;
+    api.authorTickets()
+      .then((result) => { if (active) setTickets(result.slice(0, 5)); })
+      .catch((err) => { if (active) setError(err.message); });
+    return () => { active = false; };
   }, []);
+  if (error) return <ErrorState message={error} onRetry={() => window.location.reload()} />;
   if (!tickets.length) return null;
   return (
     <ul className="mini-list">

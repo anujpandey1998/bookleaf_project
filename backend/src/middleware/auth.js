@@ -6,8 +6,12 @@ import { unauthorized, forbidden } from '../utils/errors.js';
 export async function requireAuth(req, res, next) {
   try {
     const header = req.headers.authorization || '';
-    // EventSource cannot send headers; allow ?token= fallback (validated identically below).
-    const token = header.startsWith('Bearer ') ? header.slice(7) : (typeof req.query?.token === 'string' ? req.query.token : null);
+    const cookie = req.headers.cookie
+      ?.split(';')
+      .map((part) => part.trim())
+      .find((part) => part.startsWith('bookleaf_session='));
+    const cookieToken = cookie ? cookie.slice('bookleaf_session='.length) : null;
+    const token = header.startsWith('Bearer ') ? header.slice(7) : cookieToken;
     if (!token) throw unauthorized('Missing bearer token');
     let payload;
     try {

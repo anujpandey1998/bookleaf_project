@@ -7,13 +7,45 @@ import { ok, created } from '../utils/respond.js';
 import { notFound, forbidden } from '../utils/errors.js';
 import { addSubscriber } from '../services/sseService.js';
 import { generateDraftForTicket } from '../services/aiService.js';
-import { AiUnavailableError } from '../ai/claudeClient.js';
+import { AiUnavailableError } from '../ai/geminiClient.js';
 import { AppError } from '../utils/errors.js';
+import { ROLES } from '../utils/constants.js';
+import { config } from '../config/env.js';
+import * as attachmentService from '../services/attachmentService.js';
 
 // ---------- auth ----------
 export const login = asyncHandler(async (req, res) => {
-  const result = await authService.login(req.body);
-  return ok(res, result);
+  const { token, user } = await authService.login(req.body);
+  res.cookie('bookleaf_session', token, {
+    httpOnly: true,
+    secure: config.authCookieSecure,
+    sameSite: config.authCookieSameSite,
+    path: '/api',
+    maxAge: 8 * 60 * 60 * 1000,
+  });
+  return ok(res, { user });
+});
+
+export const signup = asyncHandler(async (req, res) => {
+  const { token, user } = await authService.signupAuthor(req.body);
+  res.cookie('bookleaf_session', token, {
+    httpOnly: true,
+    secure: config.authCookieSecure,
+    sameSite: config.authCookieSameSite,
+    path: '/api',
+    maxAge: 8 * 60 * 60 * 1000,
+  });
+  return created(res, { user });
+});
+
+export const logout = asyncHandler(async (_req, res) => {
+  res.clearCookie('bookleaf_session', {
+    httpOnly: true,
+    secure: config.authCookieSecure,
+    sameSite: config.authCookieSameSite,
+    path: '/api',
+  });
+  return ok(res, { loggedOut: true });
 });
 
 export const me = asyncHandler(async (req, res) => ok(res, req.user));
@@ -58,8 +90,31 @@ export const authorCreateTicket = asyncHandler(async (req, res) => {
 });
 
 export const authorTicketDetail = asyncHandler(async (req, res) => {
-  const { ticket, messages } = await ticketService.getAuthorTicketDetail(req.params.id, req.user.id);
-  return ok(res, ticketService.shapeTicketAuthorDetail(ticket, messages));
+  const { ticket, messages, attachments } = await ticketService.getAuthorTicketDetail(req.params.id, req.user.id);
+  return ok(res, ticketService.shapeTicketAuthorDetail(ticket, messages, attachments));
+});
+
+export const uploadTicketAttachments = asyncHandler(async (req, res) => {
+  const attachments = await attachmentService.addTicketAttachments(req.params.id, req.user, req.files || []);
+  return created(res, attachments);
+});
+
+export const downloadTicketAttachment = asyncHandler(async (req, res, next) => {
+  const attachment = await attachmentService.getAttachmentForUser(req.params.id, req.user);
+  res.download(attachment.path, attachment.name, {
+    headers: { 'Content-Type': attachment.mimeType, 'X-Content-Type-Options': 'nosniff' },
+  }, (error) => {
+    if (error) next(error);
+  });
+});
+
+export const authorSendMessage = asyncHandler(async (req, res) => {
+  const id = await ticketService.addAuthorReply({
+    ticketId: req.params.id,
+    authorUser: req.user,
+    body: req.body.body,
+  });
+  return created(res, { id, kind: 'public_reply', sentAt: new Date() });
 });
 
 // SSE stream for a single ticket the author owns.
@@ -67,7 +122,7 @@ export const authorTicketEvents = asyncHandler(async (req, res) => {
   // Ownership check BEFORE opening the stream.
   const t = await ticketRepo.findTicketById(req.params.id);
   if (!t) throw notFound('Ticket not found');
-  if (t.author_user_id !== req.user.id && req.user.role !== 'admin') {
+  if (t.author_user_id !== req.user.id && req.user.role !== ROLES.ADMIN) {
     throw forbidden('This ticket belongs to another author');
   }
   addSubscriber(t.id, req.user.id, req.user.role, res);
@@ -131,7 +186,7 @@ export const adminGenerateDraft = asyncHandler(async (req, res) => {
     return ok(res, draft);
   } catch (err) {
     if (err instanceof AiUnavailableError) throw new AppError(503, err.message);
-    throw new AppError(502, `AI draft generation failed: ${String(err.message).slice(0, 200)}`);
+    throw new AppError(502, 'AI draft generation failed. Please try again or write the reply manually.', undefined, 'AI_DRAFT_FAILED');
   }
 });
 

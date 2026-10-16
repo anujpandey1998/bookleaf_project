@@ -17,6 +17,18 @@ export async function login({ email, password }) {
   return { token, user: safe };
 }
 
+export async function signupAuthor({ name, email, password }) {
+  const passwordHash = await hashPassword(password);
+  const user = await userRepo.createAuthorAccount({
+    name: name.trim(),
+    email: email.toLowerCase().trim(),
+    passwordHash,
+  });
+  const payload = { sub: user.id, role: user.role, email: user.email };
+  const token = jwt.sign(payload, config.jwt.secret, { expiresIn: config.jwt.expiresIn });
+  return { token, user };
+}
+
 export async function getMe(userId) {
   return userRepo.findUserById(userId);
 }

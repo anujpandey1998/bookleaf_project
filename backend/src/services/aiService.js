@@ -6,15 +6,32 @@
 import * as repo from '../repositories/ticketRepository.js';
 import { findBookById } from '../repositories/bookRepository.js';
 import { findUserById } from '../repositories/userRepository.js';
-import { complete, parseJsonOutput, isAiConfigured, AiUnavailableError } from '../ai/claudeClient.js';
+import { complete, parseJsonOutput, isAiConfigured, AiUnavailableError } from '../ai/geminiClient.js';
 import {
-  CLASSIFY_SYSTEM, PRIORITY_SYSTEM, DRAFT_SYSTEM, PROMPT_VERSION,
-  classifyUserPrompt, priorityUserPrompt, draftUserPrompt,
+  CLASSIFY_SYSTEM, PRIORITY_SYSTEM, PROMPT_VERSION,
+  classifyUserPrompt, priorityUserPrompt, draftUserPrompt, draftSystemForCategory,
 } from '../ai/prompts.js';
 import { TICKET_CATEGORIES, TICKET_PRIORITIES } from '../utils/constants.js';
 import { KB_VERSION } from '../ai/knowledgeBase.js';
 import { config } from '../config/env.js';
 import { notFound } from '../utils/errors.js';
+import { z } from 'zod';
+
+const ClassificationOutput = z.object({
+  category: z.enum(TICKET_CATEGORIES),
+  rationale: z.string().max(500),
+}).strict();
+const PriorityOutput = z.object({
+  priority: z.enum(TICKET_PRIORITIES),
+  rationale: z.string().max(500),
+}).strict();
+const DraftOutput = z.object({
+  draft: z.string().trim().min(40).max(8000).refine((draft) => {
+    const words = draft.match(/\S+/g)?.length || 0;
+    return words >= 80 && words <= 300;
+  }),
+  used_sections: z.array(z.string()).optional().default([]),
+}).strict();
 
 function sanitizeRationale(s, max = 500) {
   if (typeof s !== 'string') return null;
@@ -24,55 +41,80 @@ function sanitizeRationale(s, max = 500) {
 // ---------- AI output validation (pure, unit-testable) ----------
 
 export function validateClassification(text) {
-  const parsed = parseJsonOutput(text);
-  const category = parsed?.category;
-  if (!TICKET_CATEGORIES.includes(category)) {
-    throw new Error(`Invalid category returned by model: ${JSON.stringify(category)?.slice(0, 80)}`);
-  }
-  return { category, rationale: sanitizeRationale(parsed.rationale) };
+  const parsed = ClassificationOutput.safeParse(parseJsonOutput(text));
+  if (!parsed.success) throw new Error('Model returned an invalid classification schema');
+  return { category: parsed.data.category, rationale: sanitizeRationale(parsed.data.rationale) };
 }
 
 export function validatePriorityScore(text) {
-  const parsed = parseJsonOutput(text);
-  const priority = parsed?.priority;
-  if (!TICKET_PRIORITIES.includes(priority)) {
-    throw new Error(`Invalid priority returned by model: ${JSON.stringify(priority)?.slice(0, 80)}`);
-  }
-  return { priority, rationale: sanitizeRationale(parsed.rationale) };
+  const parsed = PriorityOutput.safeParse(parseJsonOutput(text));
+  if (!parsed.success) throw new Error('Model returned an invalid priority schema');
+  return { priority: parsed.data.priority, rationale: sanitizeRationale(parsed.data.rationale) };
 }
 
 export function validateDraftOutput(text) {
-  const parsed = parseJsonOutput(text);
-  const draft = typeof parsed?.draft === 'string' ? parsed.draft.trim() : null;
-  if (!draft || draft.length < 40) throw new Error('Model returned an empty or too-short draft');
-  return { draft: draft.slice(0, 8000), usedSections: Array.isArray(parsed.used_sections) ? parsed.used_sections : [] };
+  const allowedSections = new Set(['company', 'royalties', 'isbn', 'printing', 'distribution', 'production', 'metadata', 'communication']);
+  const parsed = DraftOutput.safeParse(parseJsonOutput(text));
+  if (!parsed.success) throw new Error('Model returned an invalid draft schema');
+  return {
+    draft: parsed.data.draft,
+    usedSections: parsed.data.used_sections.filter((section) => allowedSections.has(section)),
+  };
+}
+
+export function applyPriorityFloor(category, priority, rationale) {
+  if (category === 'ISBN & Metadata Issues' && ['Medium', 'Low'].includes(priority)) {
+    return {
+      priority: 'High',
+      rationale: [rationale, 'ISBN and metadata issues are escalated as high priority.'].filter(Boolean).join(' '),
+    };
+  }
+  return { priority, rationale };
+}
+
+async function completeAndValidate(options, validator) {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await complete({
+      ...options,
+      system: attempt === 0
+        ? options.system
+        : `${options.system}\nYour previous response did not match the required JSON schema. Correct the output and return only valid JSON.`,
+    });
+    try {
+      return { value: validator(response.text), model: response.model, usage: response.usage };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 export async function classifyTicket(ticket, book) {
-  const { text, usage, model } = await complete({
+  const { value, usage, model } = await completeAndValidate({
     system: CLASSIFY_SYSTEM,
     user: classifyUserPrompt({ subject: ticket.subject, description: ticket.description, bookTitle: book?.title }),
     maxTokens: 300,
-  });
-  const { category, rationale } = validateClassification(text);
+  }, validateClassification);
+  const { category, rationale } = value;
   return { category, rationale, model, usage };
 }
 
 export async function scorePriority(ticket, book, category) {
-  const { text, usage, model } = await complete({
+  const { value, usage, model } = await completeAndValidate({
     system: PRIORITY_SYSTEM,
     user: priorityUserPrompt({
       subject: ticket.subject, description: ticket.description, category, bookTitle: book?.title,
     }),
     maxTokens: 300,
-  });
-  const { priority, rationale } = validatePriorityScore(text);
+  }, validatePriorityScore);
+  const { priority, rationale } = applyPriorityFloor(category, value.priority, value.rationale);
   return { priority, rationale, model, usage };
 }
 
 export async function generateDraft(ticket, book, authorName) {
-  const { text, usage, model } = await complete({
-    system: DRAFT_SYSTEM,
+  const { value, usage, model } = await completeAndValidate({
+    system: draftSystemForCategory(ticket.category),
     user: draftUserPrompt({
       authorName,
       subject: ticket.subject,
@@ -82,8 +124,8 @@ export async function generateDraft(ticket, book, authorName) {
       book,
     }),
     maxTokens: config.ai.maxTokens,
-  });
-  const { draft, usedSections } = validateDraftOutput(text);
+  }, validateDraftOutput);
+  const { draft, usedSections } = value;
   return { draft, usedSections, model, usage };
 }
 
@@ -100,17 +142,14 @@ export async function processNewTicket(ticketId) {
   try {
     const cls = await classifyTicket(ticket, book);
     const pri = await scorePriority(ticket, book, cls.category);
-    await repo.updateTicketFields(ticketId, {
+    await repo.saveAiClassification(ticketId, {
       category: cls.category,
-      category_source: 'ai',
-      category_rationale: cls.rationale,
+      categoryRationale: cls.rationale,
       priority: pri.priority,
-      priority_source: 'ai',
-      priority_rationale: pri.rationale,
-      ai_processing_status: 'complete',
-      ai_model: cls.model,
-      ai_processed_at: new Date(),
-      ai_meta: JSON.stringify({
+      priorityRationale: pri.rationale,
+      model: cls.model,
+      processedAt: new Date(),
+      meta: JSON.stringify({
         prompt_version: PROMPT_VERSION,
         kb_version: KB_VERSION,
         classify_usage: cls.usage,
@@ -120,13 +159,14 @@ export async function processNewTicket(ticketId) {
     await repo.insertTicketEvent({ ticketId, event: 'ai_classified', detail: { category: cls.category, priority: pri.priority } });
     return { status: 'complete', category: cls.category, priority: pri.priority };
   } catch (err) {
+    const reason = err?.name === 'AiUnavailableError' ? 'AI provider unavailable' : 'AI response could not be processed';
     await repo.updateTicketFields(ticketId, {
       ai_processing_status: 'failed',
       ai_processed_at: new Date(),
-      ai_meta: JSON.stringify({ error: String(err.message).slice(0, 300), prompt_version: PROMPT_VERSION }),
+      ai_meta: JSON.stringify({ error: reason, prompt_version: PROMPT_VERSION }),
     });
-    await repo.insertTicketEvent({ ticketId, event: 'ai_failed', detail: { reason: String(err.message).slice(0, 200) } });
-    return { status: 'failed', reason: err.message };
+    await repo.insertTicketEvent({ ticketId, event: 'ai_failed', detail: { reason } });
+    return { status: 'failed', reason };
   }
 }
 
@@ -134,14 +174,19 @@ export async function processNewTicket(ticketId) {
 export async function generateDraftForTicket(ticketId) {
   const ticket = await repo.findTicketById(ticketId);
   if (!ticket) throw notFound('Ticket not found');
-  if (!isAiConfigured()) throw new AiUnavailableError('AI is not configured (missing ANTHROPIC_API_KEY). Write the reply manually.');
+  if (!isAiConfigured()) throw new AiUnavailableError('AI is not configured (missing GEMINI_API_KEY). Write the reply manually.');
   const book = ticket.book_id ? await findBookById(ticket.book_id) : null;
   const author = await findUserById(ticket.author_user_id);
   const authorName = author?.name || 'Author';
   const result = await generateDraft(ticket, book, authorName);
+  const generatedAt = new Date();
+  await repo.saveTicketDraft({
+    ticketId,
+    body: result.draft,
+    model: result.model,
+    generatedAt,
+  });
   await repo.updateTicketFields(ticketId, {
-    ai_draft: result.draft,
-    ai_draft_generated_at: new Date(),
     ai_meta: JSON.stringify({
       prompt_version: PROMPT_VERSION,
       kb_version: KB_VERSION,
@@ -150,7 +195,7 @@ export async function generateDraftForTicket(ticketId) {
     }),
   });
   await repo.insertTicketEvent({ ticketId, event: 'ai_draft_generated', detail: { model: result.model } });
-  return { draft: result.draft, generatedAt: new Date(), model: result.model };
+  return { draft: result.draft, generatedAt, model: result.model };
 }
 
 export { AiUnavailableError };

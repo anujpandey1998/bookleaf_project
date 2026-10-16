@@ -1,20 +1,28 @@
 import { createContext, useContext, useEffect, useMemo, useState, useCallback } from 'react';
-import { api, getToken, setToken } from '../api/client.js';
+import { api } from '../api/client.js';
 
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true); // restoring session
+  const [authError, setAuthError] = useState('');
 
-  const logout = useCallback(() => {
-    setToken(null);
+  const logout = useCallback(async () => {
+    await api.logout();
     setUser(null);
   }, []);
 
   const login = useCallback(async (email, password) => {
     const data = await api.login(email, password);
-    setToken(data.token);
+    setAuthError('');
+    setUser(data.user);
+    return data.user;
+  }, []);
+
+  const signup = useCallback(async (name, email, password) => {
+    const data = await api.signup(name, email, password);
+    setAuthError('');
     setUser(data.user);
     return data.user;
   }, []);
@@ -22,12 +30,12 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     let cancelled = false;
     async function restore() {
-      if (!getToken()) { setLoading(false); return; }
       try {
         const me = await api.me();
         if (!cancelled) setUser(me);
-      } catch {
-        setToken(null);
+      } catch (error) {
+        if (!cancelled) setUser(null);
+        if (!cancelled && error.status !== 401) setAuthError(error.message);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -41,7 +49,7 @@ export function AuthProvider({ children }) {
     };
   }, []);
 
-  const value = useMemo(() => ({ user, loading, login, logout }), [user, loading, login, logout]);
+  const value = useMemo(() => ({ user, loading, login, signup, logout, authError }), [user, loading, login, signup, logout, authError]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

@@ -8,6 +8,8 @@ export const config = {
   env: process.env.NODE_ENV || 'development',
   port: Number(process.env.PORT || 4000),
   clientOrigin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
+  authCookieSameSite: process.env.AUTH_COOKIE_SAME_SITE || 'Lax',
+  authCookieSecure: process.env.COOKIE_SECURE === 'true' || process.env.NODE_ENV === 'production',
   db: {
     host: process.env.DB_HOST || '127.0.0.1',
     port: Number(process.env.DB_PORT || 3306),
@@ -25,8 +27,8 @@ export const config = {
     adminPassword: process.env.SEED_ADMIN_PASSWORD || '',
   },
   ai: {
-    apiKey: process.env.ANTHROPIC_API_KEY || '',
-    model: process.env.AI_MODEL || 'claude-sonnet-4-20250514',
+    apiKey: process.env.GEMINI_API_KEY || '',
+    model: process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
     maxTokens: Number(process.env.AI_MAX_TOKENS || 1200),
     timeoutMs: Number(process.env.AI_TIMEOUT_MS || 30000),
     maxRetries: Number(process.env.AI_MAX_RETRIES ?? 2),
@@ -34,6 +36,9 @@ export const config = {
 };
 
 export function assertConfig() {
+  if (!['Lax', 'Strict', 'None'].includes(config.authCookieSameSite)) {
+    throw new Error('AUTH_COOKIE_SAME_SITE must be Lax, Strict, or None');
+  }
   if (config.env === 'production') {
     const missing = required.filter((k) => !process.env[k]);
     if (missing.length) {
@@ -41,6 +46,9 @@ export function assertConfig() {
     }
     if (config.jwt.secret.length < 16) {
       throw new Error('JWT_SECRET is too short for production use');
+    }
+    if (config.authCookieSameSite === 'None' && !config.authCookieSecure) {
+      throw new Error('Secure cookies are required when AUTH_COOKIE_SAME_SITE=None');
     }
   }
 }

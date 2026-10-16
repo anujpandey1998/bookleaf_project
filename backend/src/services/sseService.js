@@ -35,7 +35,7 @@ export function broadcast(ticketId, event, data, { authorSafe = true } = {}) {
   const set = subscribers.get(Number(ticketId));
   if (!set) return;
   for (const sub of set) {
-    if (authorSafe && sub.role === 'admin') continue; // admin UI uses polling/refresh on detail pages
+    if (authorSafe && sub.role === 'ADMIN') continue; // admin UI uses polling/refresh on detail pages
     try {
       sub.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     } catch {

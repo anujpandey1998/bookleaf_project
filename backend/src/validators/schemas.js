@@ -6,6 +6,12 @@ export const loginSchema = z.object({
   password: z.string().min(1, 'Password is required').max(200),
 });
 
+export const signupSchema = z.object({
+  name: z.string().trim().min(2, 'Name must be at least 2 characters').max(150),
+  email: z.string().trim().email('A valid email is required').max(190),
+  password: z.string().min(10, 'Password must be at least 10 characters').max(200),
+});
+
 export const createTicketSchema = z.object({
   bookId: z.coerce.number().int().positive().nullable().optional(), // null/absent = General / Account Level
   subject: z.string().trim().min(3, 'Subject must be at least 3 characters').max(200),
@@ -42,7 +48,7 @@ export const ticketQueueQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   sort: z
     .enum(['updated_desc', 'updated_asc', 'created_desc', 'created_asc', 'oldest_unresolved', 'priority_first'])
-    .default('updated_desc'),
+    .default('priority_first'),
 });
 
 export const idParamSchema = z.object({ id: z.coerce.number().int().positive() });

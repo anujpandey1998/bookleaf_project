@@ -47,6 +47,44 @@ Never invent payment dates, transaction results, production statuses, or investi
 If essential facts are missing, ask for clarification or recommend investigation instead of inventing them.`,
 };
 
+export const DRAFT_EXAMPLES = [
+  {
+    category: 'Royalty & Payments',
+    query: 'My quarterly royalty has not arrived and it is past the payment window.',
+    response: 'I’m sorry your royalty payment has not arrived. Royalties are paid within 45 days of quarter-end. Please confirm the bank account linked in your author dashboard and share which quarter is affected so the team can review the details.',
+  },
+  {
+    category: 'Royalty & Payments',
+    query: 'My pending royalty balance is Rs 750. When will it be paid?',
+    response: 'Your pending balance is below the Rs 1,000 minimum payout threshold, so it rolls over to the next cycle. Once the threshold is met, payment is made by bank transfer to the account linked in your dashboard.',
+  },
+  {
+    category: 'ISBN & Metadata Issues',
+    query: 'My live book listing shows an ISBN that belongs to another title.',
+    response: 'I’m sorry the listing shows an incorrect ISBN. A confirmed book-to-ISBN mismatch is treated as high priority and escalated to production. Please share the book title and listing link so the team can verify the mapping; the communicated investigation timeline is 48 hours.',
+  },
+  {
+    category: 'Printing & Quality',
+    query: 'Several copies have misprinted pages.',
+    response: 'I’m sorry the copies arrived with misprinted pages. Please send clear photographs of the affected pages and the book’s order details. Verified printing defects qualify for a free reprint; standard printing turnaround is 5–7 business days from order confirmation.',
+  },
+  {
+    category: 'Distribution & Availability',
+    query: 'My published book is not available on Amazon.',
+    response: 'I understand how important it is for readers to find your book. Listings typically go live within 7–10 business days after publication is complete. If that window has passed, please share the title and listing link so the team can check availability and stock synchronization.',
+  },
+  {
+    category: 'Book Status & Production Updates',
+    query: 'What stage is my manuscript currently in?',
+    response: 'I’d be happy to help confirm the current stage. Production can include editing, cover design, typesetting, proofreading, ISBN assignment, printing, and distribution setup; timing may depend on pending approvals. Please share your book title or reference so the team can verify its status.',
+  },
+  {
+    category: 'General Inquiry',
+    query: 'I need help updating my author profile.',
+    response: 'I can help point you in the right direction. Please tell us which profile detail you need to update, and avoid sending passwords or bank details in a ticket. The team will share the appropriate next step.',
+  },
+];
+
 export function kbSections(...names) {
   return names
     .map((n) => {
@@ -54,5 +92,13 @@ export function kbSections(...names) {
       if (!text) throw new Error(`Unknown knowledge base section: ${n}`);
       return `### ${n.toUpperCase()}\n${text}`;
     })
+    .join('\n\n');
+}
+
+export function kbDraftExamples(category) {
+  return DRAFT_EXAMPLES
+    .filter((example) => example.category === category)
+    .slice(0, 2)
+    .map(({ query, response }, index) => `Example ${index + 1}\nAuthor query: ${query}\nSupport reply: ${response}`)
     .join('\n\n');
 }

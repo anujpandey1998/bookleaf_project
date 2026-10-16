@@ -18,6 +18,39 @@ export async function findTicketById(id) {
   return rows[0] || null;
 }
 
+export async function insertTicketAttachment({ ticketId, uploadedBy, originalName, storageName, mimeType, sizeBytes }) {
+  const result = await query(
+    `INSERT INTO ticket_attachments (ticket_id, uploaded_by, original_name, storage_name, mime_type, size_bytes)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [ticketId, uploadedBy, originalName, storageName, mimeType, sizeBytes],
+  );
+  return result.insertId;
+}
+
+export async function listTicketAttachments(ticketId) {
+  return query(
+    `SELECT id, ticket_id, original_name, mime_type, size_bytes, created_at
+     FROM ticket_attachments WHERE ticket_id = ? ORDER BY created_at, id`,
+    [ticketId],
+  );
+}
+
+export async function findTicketAttachment(id) {
+  const rows = await query(
+    `SELECT a.id, a.ticket_id, a.uploaded_by, a.original_name, a.storage_name, a.mime_type,
+       a.size_bytes, t.author_user_id
+     FROM ticket_attachments a JOIN tickets t ON t.id = a.ticket_id
+     WHERE a.id = ? LIMIT 1`,
+    [id],
+  );
+  return rows[0] || null;
+}
+
+export async function deleteTicketAttachments(ids) {
+  if (!ids.length) return;
+  await query(`DELETE FROM ticket_attachments WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
+}
+
 export async function listTicketsByAuthor(authorUserId) {
   return query(
     `SELECT ${TICKET_LIST_FIELDS}, b.title AS book_title, b.book_id AS book_code
@@ -27,7 +60,7 @@ export async function listTicketsByAuthor(authorUserId) {
   );
 }
 
-export async function listTicketsAdmin({ status, category, priority, dateFrom, dateTo, search, page = 1, limit = 20, sort = 'updated_desc' }) {
+export async function listTicketsAdmin({ status, category, priority, dateFrom, dateTo, search, page = 1, limit = 20, sort = 'priority_first' }) {
   const where = [];
   const params = [];
   if (status) { where.push('t.status = ?'); params.push(status); }
@@ -48,7 +81,7 @@ export async function listTicketsAdmin({ status, category, priority, dateFrom, d
     created_desc: 't.created_at DESC',
     created_asc: 't.created_at ASC',
     oldest_unresolved: `FIELD(t.status,'Open','In Progress','Resolved','Closed') ASC, t.created_at ASC`,
-    priority_first: `FIELD(t.priority,'Critical','High','Medium','Low') ASC, t.updated_at DESC`,
+    priority_first: `FIELD(COALESCE(t.priority,'Low'),'Critical','High','Medium','Low') ASC, t.created_at ASC, t.id ASC`,
   };
   const orderSql = sorts[sort] || sorts.updated_desc;
 
@@ -82,10 +115,37 @@ export async function updateTicketFields(id, fields) {
   ]);
 }
 
+export async function saveAiClassification(ticketId, classification) {
+  await query(
+    `UPDATE tickets SET
+       category = IF(category_source = 'manual', category, ?),
+       category_rationale = IF(category_source = 'manual', category_rationale, ?),
+       category_source = IF(category_source = 'manual', category_source, 'ai'),
+       priority = IF(priority_source = 'manual', priority, ?),
+       priority_rationale = IF(priority_source = 'manual', priority_rationale, ?),
+       priority_source = IF(priority_source = 'manual', priority_source, 'ai'),
+       ai_processing_status = 'complete',
+       ai_model = ?,
+       ai_processed_at = ?,
+       ai_meta = ?,
+       updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`,
+    [
+      classification.category,
+      classification.categoryRationale,
+      classification.priority,
+      classification.priorityRationale,
+      classification.model,
+      classification.processedAt,
+      classification.meta,
+      ticketId,
+    ],
+  );
+}
+
 export async function nextTicketReference() {
-  const rows = await query('SELECT COUNT(*) AS c FROM tickets');
-  const n = Number(rows[0].c) + 1;
-  return `BL-TCK-${String(n).padStart(6, '0')}`;
+  const result = await query('INSERT INTO ticket_reference_sequence () VALUES ()');
+  return `BL-TCK-${String(result.insertId).padStart(6, '0')}`;
 }
 
 export async function getAdminTicketStats() {
@@ -102,26 +162,59 @@ export async function getAdminTicketStats() {
   return rows[0];
 }
 
-// ---- messages ----
 export async function insertMessage({ ticketId, senderUserId, kind, body }) {
-  const visible = kind === 'public_reply' ? 1 : 0;
+  const table = kind === 'public_reply' ? 'ticket_responses' : kind === 'internal_note' ? 'internal_notes' : null;
+  if (!table) throw new Error(`Unsupported ticket message kind: ${kind}`);
+  const senderColumn = kind === 'public_reply' ? 'sender_user_id' : 'admin_user_id';
   const result = await query(
-    `INSERT INTO messages (ticket_id, sender_user_id, kind, body, visible_to_author)
-     VALUES (?, ?, ?, ?, ?)`,
-    [ticketId, senderUserId, kind, body, visible],
+    `INSERT INTO ${table} (ticket_id, ${senderColumn}, body) VALUES (?, ?, ?)`,
+    [ticketId, senderUserId, body],
   );
   return result.insertId;
 }
 
 export async function listMessages(ticketId, { authorView = false } = {}) {
-  const visibility = authorView ? 'AND m.visible_to_author = 1' : '';
+  const notesQuery = authorView
+    ? ''
+    : `UNION ALL
+       SELECT n.id, n.ticket_id, n.admin_user_id AS sender_user_id, 'internal_note' AS kind,
+              n.body, 0 AS visible_to_author, n.created_at,
+              u.name AS sender_name, u.role AS sender_role
+       FROM internal_notes n JOIN users u ON u.id = n.admin_user_id
+       WHERE n.ticket_id = ?`;
   return query(
-    `SELECT m.id, m.ticket_id, m.sender_user_id, m.kind, m.body, m.created_at,
-            u.name AS sender_name, u.role AS sender_role
-     FROM messages m JOIN users u ON u.id = m.sender_user_id
-     WHERE m.ticket_id = ? ${visibility} ORDER BY m.created_at ASC, m.id ASC`,
+    `SELECT * FROM (
+       SELECT r.id, r.ticket_id, r.sender_user_id, 'public_reply' AS kind,
+              r.body, 1 AS visible_to_author, r.created_at,
+              u.name AS sender_name, u.role AS sender_role
+       FROM ticket_responses r JOIN users u ON u.id = r.sender_user_id
+       WHERE r.ticket_id = ?
+       ${notesQuery}
+     ) AS ticket_messages
+     ORDER BY created_at ASC, id ASC`,
+    authorView ? [ticketId] : [ticketId, ticketId],
+  );
+}
+
+export async function getTicketDraft(ticketId) {
+  const rows = await query(
+    'SELECT ticket_id, body, model, generated_at FROM ticket_drafts WHERE ticket_id = ? LIMIT 1',
     [ticketId],
   );
+  return rows[0] || null;
+}
+
+export async function saveTicketDraft({ ticketId, body, model, generatedAt }) {
+  await query(
+    `INSERT INTO ticket_drafts (ticket_id, body, model, generated_at)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE body=VALUES(body), model=VALUES(model), generated_at=VALUES(generated_at)`,
+    [ticketId, body, model, generatedAt],
+  );
+}
+
+export async function deleteTicketDraft(ticketId) {
+  await query('DELETE FROM ticket_drafts WHERE ticket_id = ?', [ticketId]);
 }
 
 // ---- events (audit trail) ----
