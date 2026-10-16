@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { isValidTransition, STATUS_TRANSITIONS, TICKET_CATEGORIES, TICKET_PRIORITIES } from '../src/utils/constants.js';
 import { parseJsonOutput } from '../src/ai/geminiClient.js';
 import { classifyTicket, validateClassification, validatePriorityScore, validateDraftOutput, applyPriorityFloor } from '../src/services/aiService.js';
-import { config } from '../src/config/env.js';
+import { config, assertConfig } from '../src/config/env.js';
 import { classifyUserPrompt, draftUserPrompt, draftSystemForCategory, CLASSIFY_SYSTEM, PRIORITY_SYSTEM, DRAFT_SYSTEM } from '../src/ai/prompts.js';
 import { DRAFT_EXAMPLES } from '../src/ai/knowledgeBase.js';
 import { loginSchema, signupSchema, createTicketSchema, adminUpdateTicketSchema } from '../src/validators/schemas.js';
@@ -185,4 +185,33 @@ test('category and priority enums match assignment exactly', () => {
 test('database role values use the documented role names', async () => {
   const { ROLES } = await import('../src/utils/constants.js');
   assert.deepEqual(ROLES, { AUTHOR: 'AUTHOR', ADMIN: 'ADMIN' });
+});
+
+test('production config requires a 32-character JWT secret', () => {
+  const oldEnv = config.env;
+  const oldSecret = config.jwt.secret;
+  const names = ['DB_HOST', 'DB_USER', 'DB_NAME', 'JWT_SECRET', 'CLIENT_ORIGIN'];
+  const oldValues = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  try {
+    config.env = 'production';
+    for (const name of names) process.env[name] = 'test-config';
+    process.env.JWT_SECRET = 'short-secret';
+    config.jwt.secret = process.env.JWT_SECRET;
+    assert.throws(assertConfig, /at least 32 characters/);
+
+    process.env.JWT_SECRET = 'x'.repeat(32);
+    config.jwt.secret = process.env.JWT_SECRET;
+    assert.doesNotThrow(assertConfig);
+
+    delete process.env.JWT_SECRET;
+    config.jwt.secret = '';
+    assert.throws(assertConfig, /Missing required environment variables: JWT_SECRET/);
+  } finally {
+    config.env = oldEnv;
+    config.jwt.secret = oldSecret;
+    for (const name of names) {
+      if (oldValues[name] === undefined) delete process.env[name];
+      else process.env[name] = oldValues[name];
+    }
+  }
 });

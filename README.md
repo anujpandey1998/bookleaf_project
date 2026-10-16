@@ -45,7 +45,18 @@ npm run build
 npm run preview
 ```
 
-The frontend build compiles the static SPA into `frontend/dist`. Deploy it with a static host configured to serve `index.html` for client-side routes. Configure `VITE_API_BASE` to the API origin when frontend and API are on different hosts; the client appends `/api/v1`.
+The frontend build compiles the static SPA into `frontend/dist`. Configure the host to serve `index.html` for client-side routes. Configure `VITE_API_BASE` to the API origin when frontend and API are on different hosts; the client appends `/api/v1`. Production deployment settings, environment variable names, cross-origin cookie requirements, and safe seeding steps are in [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md).
+
+### Production deployment checklist
+
+- Backend on Render: root `backend`, build `npm ci`, start `npm start`, health check `/api/v1/health`.
+- Frontend on Render Static Site or Vercel: root `frontend`, build `npm run build`, publish `dist`, and rewrite SPA paths to `/index.html`.
+- MySQL 8 on Railway or Aiven: map the provider connection values to the API's `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, and `DB_NAME`.
+- Set the production API's `CLIENT_ORIGIN` to the exact frontend origin. For separate HTTPS origins, set `AUTH_COOKIE_SAME_SITE=None` and `COOKIE_SECURE=true`; use a `JWT_SECRET` of at least 32 characters.
+- Seed a new production database only after verifying `DB_NAME` and taking a backup. Set `SEED_AUTHOR_PASSWORD` and `SEED_ADMIN_PASSWORD` to the demo credentials you choose and publish below; remove those seed variables after the one-time seed.
+- Do not rely on Render free-tier local disk for durable attachments. `backend/private-uploads/` is ephemeral there; attachments are a bonus feature until persistent/object storage is configured.
+
+See [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) for the full provider configuration and cross-origin cookie limitations. Deployment has not been performed or verified.
 
 ## Engineering notes
 

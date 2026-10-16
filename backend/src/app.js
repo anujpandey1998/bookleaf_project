@@ -6,6 +6,9 @@ import { config } from './config/env.js';
 import { router } from './routes/api.js';
 import { notFoundHandler, errorHandler } from './middleware/errorHandler.js';
 import { openApiSpec } from './docs/openapi.js';
+import { query } from './config/db.js';
+import { asyncHandler } from './utils/asyncHandler.js';
+import { AppError } from './utils/errors.js';
 
 export function createApp() {
   const app = express();
@@ -42,7 +45,17 @@ export function createApp() {
     return next();
   });
 
-  app.get('/api/v1/health', (req, res) => res.json({ success: true, data: { status: 'ok', time: new Date().toISOString() } }));
+  app.get('/api/v1/health', asyncHandler(async (_req, res) => {
+    try {
+      await query('SELECT 1');
+    } catch (error) {
+      // Keep diagnostics useful without exposing connection details or credentials.
+      // eslint-disable-next-line no-console
+      console.error('[health] Database check failed:', error.code || 'DB_ERROR');
+      throw new AppError(503, 'Database unavailable', undefined, 'DATABASE_UNAVAILABLE');
+    }
+    return res.json({ success: true, data: { status: 'ok', database: 'ok', time: new Date().toISOString() } });
+  }));
   app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec, { customSiteTitle: 'BookLeaf API Docs' }));
   app.get('/api/openapi.json', (req, res) => res.json(openApiSpec));
 

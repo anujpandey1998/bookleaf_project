@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const required = ['DB_HOST', 'DB_USER', 'DB_NAME', 'JWT_SECRET'];
+const required = ['DB_HOST', 'DB_USER', 'DB_NAME', 'JWT_SECRET', 'CLIENT_ORIGIN'];
 
 export const config = {
   env: process.env.NODE_ENV || 'development',
@@ -44,8 +44,8 @@ export function assertConfig() {
     if (missing.length) {
       throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
     }
-    if (config.jwt.secret.length < 16) {
-      throw new Error('JWT_SECRET is too short for production use');
+    if (config.jwt.secret.length < 32) {
+      throw new Error('JWT_SECRET must be at least 32 characters for production use');
     }
     if (config.authCookieSameSite === 'None' && !config.authCookieSecure) {
       throw new Error('Secure cookies are required when AUTH_COOKIE_SAME_SITE=None');

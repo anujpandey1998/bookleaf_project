@@ -83,6 +83,24 @@ after(async () => {
 });
 
 // ---------- auth ----------
+test('health endpoint verifies the API database connection', async () => {
+  const res = await request(app).get('/api/v1/health');
+  assert.equal(res.status, 200, res.text);
+  assert.equal(res.body.data.status, 'ok');
+  assert.equal(res.body.data.database, 'ok');
+});
+
+test('API permits credentialed CORS behind the configured proxy hop', async () => {
+  const res = await request(app).options('/api/v1/auth/me')
+    .set('Origin', 'http://localhost:5173')
+    .set('Access-Control-Request-Method', 'GET')
+    .set('Access-Control-Request-Headers', 'content-type');
+  assert.equal(res.status, 204);
+  assert.equal(res.headers['access-control-allow-origin'], 'http://localhost:5173');
+  assert.equal(res.headers['access-control-allow-credentials'], 'true');
+  assert.equal(app.get('trust proxy'), 1);
+});
+
 test('login sets an HttpOnly cookie and returns a safe user (no token or hash)', async () => {
   const res = await request(app).post('/api/v1/auth/login').send({ email: 'a1@test.com', password: 'TestPass@123' });
   assert.equal(res.status, 200);

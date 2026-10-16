@@ -91,7 +91,15 @@ export const openApiSpec = {
     },
   },
   paths: {
-    '/health': { get: { summary: 'Health check', responses: { 200: { description: 'Service is available' } } } },
+    '/health': {
+      get: {
+        summary: 'Health check, including a MySQL connectivity query',
+        responses: {
+          200: { description: 'API and database are available', content: { 'application/json': { example: { success: true, data: { status: 'ok', database: 'ok', time: '2026-10-16T10:00:00.000Z' } } } } },
+          503: errorResponse,
+        },
+      },
+    },
     '/auth/login': {
       post: {
         summary: 'Sign in and set the HttpOnly session cookie (rate limited)',
