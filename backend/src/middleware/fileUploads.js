@@ -1,12 +1,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import multer from 'multer';
 import { AppError } from '../utils/errors.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const PRIVATE_UPLOAD_DIR = path.resolve(__dirname, '..', '..', 'private-uploads');
+export function resolvePrivateUploadDir({
+  isVercel = Boolean(process.env.VERCEL),
+  tempDirectory = os.tmpdir(),
+} = {}) {
+  return isVercel
+    ? path.join(tempDirectory, 'bookleaf-private-uploads')
+    : path.resolve(__dirname, '..', '..', 'private-uploads');
+}
+
+export const PRIVATE_UPLOAD_DIR = resolvePrivateUploadDir();
 fs.mkdirSync(PRIVATE_UPLOAD_DIR, { recursive: true });
 
 const allowedExtensions = new Set(['.pdf', '.jpg', '.jpeg', '.png', '.gif', '.webp', '.mp4', '.mov', '.webm']);

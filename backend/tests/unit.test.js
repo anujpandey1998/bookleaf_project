@@ -1,6 +1,7 @@
 // Pure unit tests — no database or network required. Run: npm test
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 
 import { isValidTransition, STATUS_TRANSITIONS, TICKET_CATEGORIES, TICKET_PRIORITIES } from '../src/utils/constants.js';
 import { parseJsonOutput } from '../src/ai/geminiClient.js';
@@ -10,6 +11,7 @@ import { classifyUserPrompt, draftUserPrompt, draftSystemForCategory, CLASSIFY_S
 import { DRAFT_EXAMPLES } from '../src/ai/knowledgeBase.js';
 import { loginSchema, signupSchema, createTicketSchema, adminUpdateTicketSchema } from '../src/validators/schemas.js';
 import { shapeTicketListItem, shapeTicketAuthorDetail } from '../src/services/ticketService.js';
+import { resolvePrivateUploadDir } from '../src/middleware/fileUploads.js';
 
 // ---------- status lifecycle ----------
 test('status transitions follow documented lifecycle', () => {
@@ -214,4 +216,13 @@ test('production config requires a 32-character JWT secret', () => {
       else process.env[name] = oldValues[name];
     }
   }
+});
+
+test('Vercel uploads use writable temporary storage instead of the bundled source path', () => {
+  const tempDirectory = path.join('vercel-temp-root');
+  assert.equal(
+    resolvePrivateUploadDir({ isVercel: true, tempDirectory }),
+    path.join(tempDirectory, 'bookleaf-private-uploads'),
+  );
+  assert.match(resolvePrivateUploadDir({ isVercel: false }), /backend[\\/]private-uploads$/);
 });
