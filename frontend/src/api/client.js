@@ -44,7 +44,7 @@ async function request(path, { method = 'GET', body, params, signal, withMeta = 
     if (response.ok) throw new ApiError('The server returned an invalid response.', response.status, null, 'INVALID_RESPONSE');
   }
 
-  if (response.status === 401 && !path.startsWith('/auth/login')) {
+  if (response.status === 401 && !path.startsWith('/auth/login') && path !== '/auth/me') {
     window.dispatchEvent(new Event('bookleaf:unauthorized'));
   }
   if (!response.ok) {
